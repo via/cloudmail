@@ -6,25 +6,23 @@ from twisted.python import filepath
 from zope.interface import implements
 import time, os, random, pickle
 
-from twittermail import TwitterUserAccount, TwitterImapMailbox, TwitterCredentialsChecker, ObjCache
+from cloudmail import CloudFSUserAccount, CloudFSImapMailbox
 
 import email
 
 class MailUserRealm(object):
   implements(portal.IRealm)
   avatarInterfaces = {
-    imap4.IAccount: TwitterUserAccount,
+    imap4.IAccount: CloudFSUserAccount,
     }
 
-  def __init__(self, cache):
-    self.cache = cache
 
   def requestAvatar(self, avatarId, mind, *interfaces):
     for requestedInterface in interfaces:
       if self.avatarInterfaces.has_key(requestedInterface):
         # return an instance of the correct class
         avatarClass = self.avatarInterfaces[requestedInterface]
-        avatar = avatarClass(self.cache)
+        avatar = avatarClass(avatarId)
         # null logout function: take no arguments and do nothing
         logout = lambda: None
         return defer.succeed((requestedInterface, avatar, logout))
@@ -58,10 +56,10 @@ class IMAPFactory(protocol.Factory):
 
 if __name__ == "__main__":
     
-    cache = ObjCache()
 
-    portal = portal.Portal(MailUserRealm(cache))
-    portal.registerChecker(TwitterCredentialsChecker(cache))
+    portal = portal.Portal(MailUserRealm())
+#    portal.registerChecker(TwitterCredentialsChecker(cache))
+    portal.registerChecker(checkers.FilePasswordDB("/home/via/pass"))
 
     factory = IMAPFactory()
     factory.portal = portal
