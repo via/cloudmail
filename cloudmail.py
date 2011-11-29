@@ -58,9 +58,18 @@ class CloudFSUserAccount(object):
   def select(self, path, rw=True):
     print "Select: %s" % path
     if self.conn.sismember( ("%s:mailboxes") % self.user, path):
-      return CloudFSImapMailbox(self.user, path, self.pool)
+      box = CloudFSImapMailbox(self.user, path, self.pool)
+      #box.subscribe()
+      #d = box.listen()
+      #d.addCallback(printMsg)
+      #qkey = "%s:mailboxes:queue" % (self.user)
+      #self.conn.publish(qkey, "bitches")
+      return box
     else:
       return None
+
+  def printMsg(msg):
+    print "MSG: ", msg
 
   def close(self):
     return True
@@ -124,12 +133,32 @@ class CloudFSImapMailbox(object):
     self.listeners = []
     self.pool = pool
     self.conn = redis.Redis(connection_pool=pool)
-    #self.conn.sadd("%s:mailboxes:%s:flags" % (self.user, self.folder), "\Seen")
-    #self.conn.srem("%s:mailboxes:%s:flags" % (self.user, self.folder),
-    #    "\Recent")
-    #self.conn.set("%s:mailboxes:%s:recent" % (self.user, self.folder), 0)
+    #self.seqlist = []  #Fill this list in where seqlist[seq_number] = uid
+                        #The uidlist can remain in place to be read from on
+                        #initialization
+    self.qkey = "%s:mailboxes:queue" % (self.user) # , self.folder)
+    uidlist_key = "%s:mailboxes:%s:uidlist" % (self.user, self.folder)
+    self.seqlist = [int(x) for x in self.conn.zrange(uidlist_key, 0, -1)]
+    self.notifications= None
 
+  def subscribe(self):
+    #subscribe to uidlist/flags keys (can we subcribe to a glob?)
+    self.notifications = self.conn.pubsub()
+    self.notifications.subscribe(self.qkey)
 
+  def listen(self):
+    d = defer.Deferred()
+    msg = None
+    val = yield self.notifications.listen()
+    defer.returnValue(val)
+
+  def subscribe_callback(r):
+      print "SUBRECV: ", r
+
+  def __del__(self):
+    #unsubscribe from the flgas we care about.
+    pass
+     
   def getHierarchicalDelimiter(self):
     return MAILBOXDELIMITER
 
@@ -140,7 +169,8 @@ class CloudFSImapMailbox(object):
 #    return flags
 
   def getMessageCount(self):
-    messages = self.conn.get("%s:mailboxes:%s:count" % (self.user, self.folder))
+      #messages = self.conn.get("%s:mailboxes:%s:count" % (self.user, self.folder))
+    messages = len(self.seqlist)
     return int(messages)
 
   def getRecentCount(self):
@@ -159,7 +189,7 @@ class CloudFSImapMailbox(object):
     return int(validity)
 
   def getUID(self, messageNum):
-    return messageNum
+    return self.seqlist[messageNum - 1]
 
   def getUIDNext(self):
     uidnext = self.conn.get("%s:mailboxes:%s:uidnext" % (self.user, self.folder))
@@ -187,19 +217,21 @@ class CloudFSImapMailbox(object):
             msg_uid = id
             seq = self.getSeqForUid(id)
         else:
-            key = "%s:mailboxes:%s:uidlist" % (self.user, self.folder)
-            msg_uid = int(self.conn.zrange(key, id-1, id-1)[0])
             seq = id
+            msg_uid = self.seqlist[seq - 1]
         print "message uid: %d    seq: %d   isuid: %d" %( msg_uid, seq, uid)
         result.append((seq, CloudFSImapMessage(self.user, self.folder, msg_uid, self.pool)))
 
     return result
       
   def getSeqForUid(self, uid):
-    key = "%s:mailboxes:%s:uidlist" % (self.user, self.folder)
-    seq = self.conn.zrank(key, uid)
-    if seq:
-      return seq + 1
+    #Need to replace this list with something that can do faster lookups
+    try:
+      seq = self.seqlist.index(uid)
+      if seq:
+        return seq + 1
+    except:
+      pass
     raise Exception("%d is not a valid UID." % uid)
 
   def addListener(self, listener):
@@ -233,8 +265,10 @@ class CloudFSImapMailbox(object):
     msg_uid = self.conn.incr("%s:mailboxes:%s:uidnext" % (self.user,
       self.folder)) - 1;
     
-    seq_number = self.conn.zadd("%s:mailboxes:%s:uidlist"% (self.user, self.folder), msg_uid, msg_uid)
+    self.conn.zadd("%s:mailboxes:%s:uidlist"% (self.user, self.folder), msg_uid, msg_uid)
 
+    self.seqlist.append(msg_uid)
+    seq_number = len(self.seqlist)
     if not flags:
         flags = ['\Recent']
 
@@ -255,6 +289,7 @@ class CloudFSImapMailbox(object):
         self.folder, msg_uid, header.lower()), email_obj[header])
       print header, msg_uid, self.folder, self.user
     self.conn.incr("%s:mailboxes:%s:recent" % (self.user, self.folder))
+
     return defer.succeed(seq_number)
 
   def store(self, messages, flags, mode, uid):
@@ -280,8 +315,7 @@ class CloudFSImapMailbox(object):
         msg_uid = id
         seq = self.getSeqForUid(id)
       else:
-        key = "%s:mailboxes:%s:uidlist" % (self.user, self.folder)
-        msg_uid = int(self.conn.zrange(key, id-1, id-1)[0])
+        msg_uid = self.seqlist[id - 1]
         seq = id
       print "message uid: %d    seq: %d   isuid: %d" %( msg_uid, seq, uid)
       key = "%s:mailboxes:%s:mail:%s:flags" % (self.user, self.folder, msg_uid)
@@ -315,32 +349,46 @@ class CloudFSImapMailbox(object):
     return result
 
   def expunge(self):
-    key = "%s:mailboxes:%s:deleted" % (self.user, self.folder)
-    uid = self.conn.spop(key)
     deleted_seqs = []
+    uid = self.get_next_deleted_uid()
     while uid:
       deleted_seqs.append(self.getSeqForUid(uid))
       self.expunge_helper(uid)
-      uid = self.conn.spop(key)
+      uid = self.get_next_deleted_uid()
 
     return deleted_seqs
 
+  def get_next_deleted_uid(self):
+    key = "%s:mailboxes:%s:deleted" % (self.user, self.folder)
+    val =self.conn.spop(key)
+    if val:
+        return int(val)
+    return None
+
   def expunge_helper(self, uid):
     uidlist_key = "%s:mailboxes:%s:uidlist" % (self.user, self.folder)
-    self.conn.zrem(uidlist_key, uid)
+    flags_key = "%s:mailboxes:%s:mail:%s:flags" % (self.user, self.folder, uid)
     glob_key = "%s:mailboxes:%s:mail:%s:*" % (self.user,self.folder, uid)
+    self.conn.zrem(uidlist_key, uid)
     keys = self.conn.keys(glob_key)
+    keys.remove(flags_key)
     print "DELETING: ", keys
     self.conn.delete(*keys)
     # decrement count
     count_key = "%s:mailboxes:%s:count" % (self.user, self.folder)
     self.conn.decr(count_key)
-    flags_key = "%s:mailboxes:%s:mail:%s:flags" % (self.user, self.folder, uid)
-    stored_flags = self.conn.smembers(key)
+    stored_flags = self.conn.smembers(flags_key)
+    # set expire on flags_key so that it gets cleanedup after the time
+    # the connection timeout is hit. So, either the session times out,
+    # or the client updates its view.
+    # TODO: if someone else updates this key the expiration is removed.
+    #       so keys may accumulate. If this turns out to be an issue, fix it.
+    self.conn.expire(flags_key, 3600) 
     if "\Recent" in stored_flags:
       recent_key = "%s:mailboxes:%s:recent" % (self.user, self.folder)
       self.conn.decr(recent_key)
 
+    
   def destroy(self):
     raise imap4.MailboxException("Not implemented")
     
