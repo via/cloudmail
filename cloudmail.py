@@ -14,13 +14,16 @@ from cStringIO import StringIO
 import random
 import redis
 import fnmatch
+import heapq
+import bisect
 
 _statusRequestDict = {
     'MESSAGES': 'getMessageCount',
     'RECENT': 'getRecentCount',
     'UIDNEXT': 'getUIDNext',
     'UIDVALIDITY': 'getUIDValidity',
-    'UNSEEN': 'getUnseenCount'
+    'UNSEEN': 'getUnseenCount',
+    'PERMANENTFLAGS': 'getPermanentFlags'
 }
 
 REMOVE_FLAGS = -1
@@ -86,7 +89,6 @@ class CloudFSUserAccount(object):
           random.randint(0, 65535))
       pipe.set("%s:mailboxes:%s:count" % (self.user, path), 0)
       pipe.set("%s:mailboxes:%s:unseen" % (self.user, path), 0)
-      pipe.set("%s:mailboxes:%s:recent" % (self.user, path), 0)
       pipe.set("%s:mailboxes:%s:uidnext" % (self.user, path), 1)
       pipe.execute()
     except redis.WatchError:
@@ -103,7 +105,6 @@ class CloudFSUserAccount(object):
       pipe.delete("%s:mailboxes:%s:flags" % (self.user, path))
       pipe.delete("%s:mailboxes:%s:uidvalidity" % (self.user, path))
       pipe.delete("%s:mailboxes:%s:count" % (self.user, path))
-      pipe.delete("%s:mailboxes:%s:recent" % (self.user, path))
       pipe.delete("%s:mailboxes:%s:unseen" % (self.user, path))
       pipe.delete("%s:mailboxes:%s:uidnext" % (self.user, path))
       pipe.execute()
@@ -138,8 +139,11 @@ class CloudFSImapMailbox(object):
                         #initialization
     self.qkey = "%s:mailboxes:queue" % (self.user) # , self.folder)
     uidlist_key = "%s:mailboxes:%s:uidlist" % (self.user, self.folder)
-    self.seqlist = [int(x) for x in self.conn.zrange(uidlist_key, 0, -1)]
-    self.notifications= None
+    self.seqlist = ([(int(x), []) for x in
+        self.conn.zrange(uidlist_key, 0, -1)])
+    self.notifications = None
+    self.recent_count = 0
+    self.deleted_seqs = []
 
   def subscribe(self):
     #subscribe to uidlist/flags keys (can we subcribe to a glob?)
@@ -168,14 +172,17 @@ class CloudFSImapMailbox(object):
     return ["\Answered", "\Flagged", "\Deleted", "\Seen", "\Draft"]
 #    return flags
 
+  def getPermanentFlags(self):
+      return []
+
   def getMessageCount(self):
       #messages = self.conn.get("%s:mailboxes:%s:count" % (self.user, self.folder))
     messages = len(self.seqlist)
     return int(messages)
 
   def getRecentCount(self):
-    messages = self.conn.get("%s:mailboxes:%s:recent" % (self.user, self.folder))
-    return int(messages)
+      #messages = self.conn.get("%s:mailboxes:%s:recent" % (self.user, self.folder))
+    return self.recent_count
 
   def getUnseenCount(self):
     messages = self.conn.get("%s:mailboxes:%s:unseen" % (self.user, self.folder))
@@ -189,7 +196,7 @@ class CloudFSImapMailbox(object):
     return int(validity)
 
   def getUID(self, messageNum):
-    return self.seqlist[messageNum - 1]
+    return self.seqlist[messageNum - 1][0]
 
   def getUIDNext(self):
     uidnext = self.conn.get("%s:mailboxes:%s:uidnext" % (self.user, self.folder))
@@ -218,16 +225,19 @@ class CloudFSImapMailbox(object):
             seq = self.getSeqForUid(id)
         else:
             seq = id
-            msg_uid = self.seqlist[seq - 1]
+            msg_uid = self.seqlist[seq - 1][0]
         print "message uid: %d    seq: %d   isuid: %d" %( msg_uid, seq, uid)
-        result.append((seq, CloudFSImapMessage(self.user, self.folder, msg_uid, self.pool)))
+        result.append((seq, CloudFSImapMessage(self.user, self.folder, msg_uid,
+            self.pool, self.seqlist[seq - 1][1])))
 
     return result
       
   def getSeqForUid(self, uid):
     #Need to replace this list with something that can do faster lookups
     try:
-      seq = self.seqlist.index(uid)
+      seq = bisect.bisect_left(map(lambda x: x[0], self.seqlist), uid)
+      if seq == len(self.seqlist) or self.seqlist[seq][0] != uid:
+          raise ValueError
       if seq:
         return seq + 1
     except:
@@ -267,13 +277,12 @@ class CloudFSImapMailbox(object):
     
     self.conn.zadd("%s:mailboxes:%s:uidlist"% (self.user, self.folder), msg_uid, msg_uid)
 
-    self.seqlist.append(msg_uid)
+    self.seqlist.append((msg_uid, ['\Recent']))
     seq_number = len(self.seqlist)
-    if not flags:
-        flags = ['\Recent']
 
-    self.conn.sadd("%s:mailboxes:%s:mail:%s:flags" % (self.user, self.folder,
-      msg_uid), *flags)
+    if flags:
+        self.conn.sadd("%s:mailboxes:%s:mail:%s:flags" % (self.user, self.folder,
+          msg_uid), *flags)
     self.conn.set("%s:mailboxes:%s:mail:%s:date" % (self.user, self.folder,
       msg_uid), rfc822date())
     self.conn.incr("%s:mailboxes:%s:count" % (self.user, self.folder))
@@ -289,6 +298,7 @@ class CloudFSImapMailbox(object):
         self.folder, msg_uid, header.lower()), email_obj[header])
       print header, msg_uid, self.folder, self.user
     self.conn.incr("%s:mailboxes:%s:recent" % (self.user, self.folder))
+    self.recent_count += 1
 
     return defer.succeed(seq_number)
 
@@ -315,7 +325,7 @@ class CloudFSImapMailbox(object):
         msg_uid = id
         seq = self.getSeqForUid(id)
       else:
-        msg_uid = self.seqlist[id - 1]
+        msg_uid = self.seqlist[id - 1][0]
         seq = id
       print "message uid: %d    seq: %d   isuid: %d" %( msg_uid, seq, uid)
       key = "%s:mailboxes:%s:mail:%s:flags" % (self.user, self.folder, msg_uid)
@@ -335,14 +345,13 @@ class CloudFSImapMailbox(object):
       stored_flags = self.conn.smembers(key)
 
       #account for deleted flag modifications
-      del_key = "%s:mailboxes:%s:deleted" % (self.user, self.folder)
       print "Stored flags: " , stored_flags
       if "\\Deleted" in stored_flags:
         print "DELETED"
-        self.conn.sadd(del_key, msg_uid)
+        self.deleted_seqs.append(seq)
       else:
         print " NOT DELETED"
-        self.conn.srem(del_key, msg_uid)
+        self.deleted_seqs.remove(seq)
 
       result[seq] = stored_flags
 
@@ -350,26 +359,30 @@ class CloudFSImapMailbox(object):
 
   def expunge(self):
     deleted_seqs = []
-    uid = self.get_next_deleted_uid()
-    while uid:
-      deleted_seqs.append(self.getSeqForUid(uid))
-      self.expunge_helper(uid)
-      uid = self.get_next_deleted_uid()
+    seq = self.get_next_deleted_seq()
+    while seq:
+      deleted_seqs.append(seq)
+      self.expunge_helper(self.seqlist[seq - 1][0])
+      seq = self.get_next_deleted_seq()
+
+    uidlist_key = "%s:mailboxes:%s:uidlist" % (self.user, self.folder)
+    self.seqlist = ([(int(x), []) for x in
+        self.conn.zrange(uidlist_key, 0, -1)])
 
     return deleted_seqs
 
-  def get_next_deleted_uid(self):
-    key = "%s:mailboxes:%s:deleted" % (self.user, self.folder)
-    val =self.conn.spop(key)
-    if val:
-        return int(val)
+  def get_next_deleted_seq(self):
+    if len(self.deleted_seqs):
+        return self.deleted_seqs.pop()
     return None
 
   def expunge_helper(self, uid):
     uidlist_key = "%s:mailboxes:%s:uidlist" % (self.user, self.folder)
     flags_key = "%s:mailboxes:%s:mail:%s:flags" % (self.user, self.folder, uid)
     glob_key = "%s:mailboxes:%s:mail:%s:*" % (self.user,self.folder, uid)
-    self.conn.zrem(uidlist_key, uid)
+    
+    if not self.conn.zrem(uidlist_key, uid):
+        return
     keys = self.conn.keys(glob_key)
     keys.remove(flags_key)
     print "DELETING: ", keys
@@ -384,9 +397,6 @@ class CloudFSImapMailbox(object):
     # TODO: if someone else updates this key the expiration is removed.
     #       so keys may accumulate. If this turns out to be an issue, fix it.
     self.conn.expire(flags_key, 3600) 
-    if "\Recent" in stored_flags:
-      recent_key = "%s:mailboxes:%s:recent" % (self.user, self.folder)
-      self.conn.decr(recent_key)
 
     
   def destroy(self):
@@ -395,19 +405,21 @@ class CloudFSImapMailbox(object):
 class CloudFSImapMessage(object):
   implements(imap4.IMessage)
   
-  def __init__(self, user, mailbox, uid, pool):
+  def __init__(self, user, mailbox, uid, pool, flags):
     #print "MESSAGE: %s" % info
     self.user = user
     self.folder = mailbox
     self.uid = uid
+    self.session_flags = flags
     self.conn = redis.Redis(connection_pool=pool)
     
   def getUID(self):
     return self.uid
     
   def getFlags(self):
-    return self.conn.smembers("%s:mailboxes:%s:mail:%s:flags" % (self.user,
-      self.folder, self.uid))
+      print "session flags: ", self.session_flags
+      return self.conn.smembers("%s:mailboxes:%s:mail:%s:flags" % (self.user,
+        self.folder, self.uid)).union(self.session_flags)
 
     
   def getInternalDate(self):
@@ -418,7 +430,7 @@ class CloudFSImapMessage(object):
     
   def getHeaders(self, negate, *names):
     headerdict = {}
-    lowernames = map(lambda s: s.lower(), names)
+    lowernames = [name.lower() for name in names]
     headers = self.conn.smembers("%s:mailboxes:%s:mail:%s:headers" % (self.user,
       self.folder, self.uid))
     for i in map(lambda s: s.lower(), headers):
