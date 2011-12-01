@@ -29,18 +29,26 @@ SET_FLAGS = 0
 ADD_FLAGS = 1
 
 MAILBOXDELIMITER = "."
-#The initial Mail Boxes, None's will be replaced with MailBox objects
 
 class MailboxSubscriber(txRedisSubscriber):
 
     def messageReceived(self, channel, message):
-        print "received %s on %s" % (message, channel)
+        #        print "received %s on %s" % (message, channel)
         (cmd, arg) = message.split(" ")
         if "count" in cmd:
-            print "count!"
+            #print "count!"
             newuid = int(arg)
             self.box.seqlist.append( (newuid, []))
             self.listener.newMessages(self.box.getMessageCount(), None)
+        elif "flags" in cmd:
+            altereduid = int(arg)
+            flags_key = "%s:mailboxes:%s:mail:%s:flags" % (self.box.user,
+                    self.box.folder, altereduid)
+            seq = self.box.getSeqForUid(altereduid)
+            curflags = self.box.conn.smembers(flags_key)
+            self.box.correctDeletedList(curflags, seq)
+            mapping = {seq : tuple(curflags)}
+            self.listener.flagsChanged(mapping)
 
 
     def assignListener(self, listener, box):
@@ -67,7 +75,7 @@ class CloudFSUserAccount(object):
   #Get all the mailboxes and setup the SQL DB
   def listMailboxes(self, ref, wildcard):
     boxes = self.conn.smembers("%s:mailboxes" % self.user)
-    print self.user
+    #print self.user
     mail_boxes = []
     for i in boxes:
         newbox = CloudFSImapMailbox(self.user, i, self.pool)
@@ -78,7 +86,7 @@ class CloudFSUserAccount(object):
 
   #Select a mailbox
   def select(self, path, rw=True):
-    print "Select: %s" % path
+      #print "Select: %s" % path
     if self.conn.sismember( ("%s:mailboxes") % self.user, path):
       box = CloudFSImapMailbox(self.user, path, self.pool)
       #box.subscribe()
@@ -91,7 +99,8 @@ class CloudFSUserAccount(object):
       return None
 
   def printMsg(msg):
-    print "MSG: ", msg
+      pass
+      #print "MSG: ", msg
 
   def close(self):
     return True
@@ -147,7 +156,7 @@ class CloudFSImapMailbox(object):
   implements(imap4.IMailbox)
 
   def __init__(self, user, path, pool):
-    print "Fetching: %s" % path
+      #print "Fetching: %s" % path
     self.folder = path
     self.user = user;
     self.listeners = []
@@ -176,7 +185,8 @@ class CloudFSImapMailbox(object):
     defer.returnValue(val)
 
   def subscribe_callback(r):
-      print "SUBRECV: ", r
+      pass
+      #print "SUBRECV: ", r
 
   def __del__(self):
     #unsubscribe from the flgas we care about.
@@ -233,10 +243,10 @@ class CloudFSImapMailbox(object):
         if not messages.last or messages.last > self.getMessageCount():
             messages.last = self.getMessageCount()
 
-    print "Message.last: ", messages.last
+    #print "Message.last: ", messages.last
 
     for id in messages:
-        print "ID: ", id
+        #print "ID: ", id
         seq = None
         msg_uid = None
         if uid:
@@ -245,7 +255,7 @@ class CloudFSImapMailbox(object):
         else:
             seq = id
             msg_uid = self.seqlist[seq - 1][0]
-        print "message uid: %d    seq: %d   isuid: %d" %( msg_uid, seq, uid)
+        #print "message uid: %d    seq: %d   isuid: %d" %( msg_uid, seq, uid)
         result.append((seq, CloudFSImapMessage(self.user, self.folder, msg_uid,
             self.pool, self.seqlist[seq - 1][1])))
 
@@ -257,11 +267,10 @@ class CloudFSImapMailbox(object):
       seq = bisect.bisect_left(map(lambda x: x[0], self.seqlist), uid)
       if seq == len(self.seqlist) or self.seqlist[seq][0] != uid:
           raise ValueError
-      if seq:
-        return seq + 1
+      return seq + 1
     except:
-      pass
-    raise Exception("%d is not a valid UID." % uid)
+        raise Exception("%d is not a valid UID." % uid)
+    #print self.seqlist
 
   @defer.inlineCallbacks
   def addListener(self, listener):
@@ -272,12 +281,16 @@ class CloudFSImapMailbox(object):
     yield listener.connection.subscribe(mailbox_key)
 
     self.listeners.append(listener)
-    print "Listener Added"
+    #print "Listener Added"
     defer.returnValue(True)
 
   def removeListener(self, listener):
-    print "Listener Deleted"
+    mailbox_key = "%s:mailboxes:%s:channel" % (self.user, self.folder)
+    #print "Listener Deleted"
     self.listeners.remove(listener)
+    listener.connection.unsubscribe(mailbox_key)
+    del listener.connection.box
+    del listener.connection
     return True
 
   def requestStatus(self, names):
@@ -320,11 +333,11 @@ class CloudFSImapMailbox(object):
       msg_uid), body)
     self.conn.sadd("%s:mailboxes:%s:mail:%s:headers" % (self.user, self.folder,
       msg_uid), *(email_obj.keys()))
-    print email_obj.keys()
+    #print email_obj.keys()
     for header in email_obj.keys():
       self.conn.set("%s:mailboxes:%s:mail:%s:header:%s" % (self.user,
         self.folder, msg_uid, header.lower()), email_obj[header])
-      print header, msg_uid, self.folder, self.user
+      #print header, msg_uid, self.folder, self.user
     self.conn.incr("%s:mailboxes:%s:recent" % (self.user, self.folder))
     self.recent_count += 1
     self.conn.publish("%s:mailboxes:%s:channel" % (self.user, self.folder),
@@ -332,7 +345,7 @@ class CloudFSImapMailbox(object):
     return defer.succeed(seq_number)
 
   def store(self, messages, flags, mode, uid):
-    print "STORE: %s :: %s :: %s :: %s" % (messages, flags, mode, uid)
+      #print "STORE: %s :: %s :: %s :: %s" % (messages, flags, mode, uid)
 
     if uid:
       if not messages.last or messages.last > self.getUIDNext():
@@ -341,13 +354,13 @@ class CloudFSImapMailbox(object):
       if not messages.last or messages.last > self.getMessageCount():
         messages.last = self.getMessageCount()
 
-    print "Message.last: ", messages.last
+    #print "Message.last: ", messages.last
 
     # seq => flasgs.str
     result = {}
 
     for id in messages:
-      print "ID: ", id
+        #print "ID: ", id
       seq = None
       msg_uid = None
       if uid:
@@ -356,10 +369,10 @@ class CloudFSImapMailbox(object):
       else:
         msg_uid = self.seqlist[id - 1][0]
         seq = id
-      print "message uid: %d    seq: %d   isuid: %d" %( msg_uid, seq, uid)
+      #print "message uid: %d    seq: %d   isuid: %d" %( msg_uid, seq, uid)
       key = "%s:mailboxes:%s:mail:%s:flags" % (self.user, self.folder, msg_uid)
 
-      print "Flags %s" % flags
+      #print "Flags %s" % flags
       if mode == REMOVE_FLAGS:
         self.conn.srem(key, *flags)
       elif mode == SET_FLAGS:
@@ -372,23 +385,27 @@ class CloudFSImapMailbox(object):
         self.conn.sadd(key, *flags)
 
       stored_flags = self.conn.smembers(key)
+      self.correctDeletedList(stored_flags, seq)
 
-      #account for deleted flag modifications
-      print "Stored flags: " , stored_flags
-      if "\\Deleted" in stored_flags:
-        print "DELETED"
-        self.deleted_seqs.append(seq)
-      else:
-        print " NOT DELETED"
-        try:
-            self.deleted_seqs.remove(seq)
-        except Exception:
-            print "caught and ignored this, because its not even a problem..."
-        
+      self.conn.publish("%s:mailboxes:%s:channel" % (self.user, self.folder),
+              "flags %d" % (msg_uid))
 
       result[seq] = stored_flags
 
     return result
+  def correctDeletedList(self, flags, seq):
+      #account for deleted flag modifications
+      #print "Stored flags: " , flags
+      if "\\Deleted" in flags:
+          #print "DELETED"
+        self.deleted_seqs.append(seq)
+      else:
+          #print " NOT DELETED"
+        try:
+            self.deleted_seqs.remove(seq)
+        except Exception:
+            pass
+            #print "caught and ignored this, because its not even a problem..."
 
   def expunge(self):
     deleted_seqs = []
@@ -418,7 +435,7 @@ class CloudFSImapMailbox(object):
         return
     keys = self.conn.keys(glob_key)
     keys.remove(flags_key)
-    print "DELETING: ", keys
+    #print "DELETING: ", keys
     self.conn.delete(*keys)
     # decrement count
     count_key = "%s:mailboxes:%s:count" % (self.user, self.folder)
@@ -450,7 +467,7 @@ class CloudFSImapMessage(object):
     return self.uid
     
   def getFlags(self):
-      print "session flags: ", self.session_flags
+      #print "session flags: ", self.session_flags
       return self.conn.smembers("%s:mailboxes:%s:mail:%s:flags" % (self.user,
         self.folder, self.uid)).union(self.session_flags)
 
@@ -473,14 +490,14 @@ class CloudFSImapMessage(object):
           headerdict[i] = thisheader
       if i not in lowernames and negate:
           headerdict[i] = thisheader
-    print "getHeaders(): ", lowernames, headerdict
+    #print "getHeaders(): ", lowernames, headerdict
     return headerdict
     
   def getBodyFile(self):
     body = self.conn.get("%s:mailboxes:%s:mail:%s:body" % (self.user,
       self.folder, self.uid))
     headerstart = body.find('\r\n\r\n')
-    txt = body[headerstart+2:].encode("utf-8")
+    txt = body[headerstart+4:]
     return StringIO(txt)
     
   def getSize(self):
@@ -491,7 +508,7 @@ class CloudFSImapMessage(object):
     return False
     
   def getSubPart(self, part):
-    print "SUBPART:: %s" % part
+      #print "SUBPART:: %s" % part
     raise imap4.MailboxException("getSubPart not implemented")
 
 

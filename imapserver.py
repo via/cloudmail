@@ -45,7 +45,7 @@ class IMAPServerProtocol(imap4.IMAP4Server):
       print "SERVER:", line
 
 class IMAPFactory(protocol.Factory):
-  protocol = IMAPServerProtocol
+  protocol = imap4.IMAP4Server
   portal = None # placeholder
 
   def buildProtocol(self, address):
