@@ -1,21 +1,19 @@
-import base64, urllib2, sys, re, time
-
-from twisted.internet import reactor
-from twisted.mail import imap4
-from twisted.mail.smtp import rfc822date
-from zope.interface import implements
-from twisted.internet import reactor, defer, protocol
-from twisted.cred import checkers, credentials, error as credError
-from urlparse import urlparse
-from urllib2 import HTTPError
-from email.Parser import Parser
-from email.Generator import Generator
-from cStringIO import StringIO
+import bisect
+import fnmatch
 import random
 import redis
-import fnmatch
-import heapq
-import bisect
+
+from cStringIO import StringIO
+from email.Generator import Generator
+from email.Parser import Parser
+from twisted.cred import checkers, credentials, error as credError
+from twisted.internet import reactor, defer, protocol
+from twisted.mail import imap4
+from twisted.mail.smtp import rfc822date
+from txredis.protocol import Redis as txRedis
+from txredis.protocol import RedisClientFactory as txRedisClientFactory
+from txredis.protocol import RedisSubscriber as txRedisSubscriber
+from zope.interface import implements
 
 _statusRequestDict = {
     'MESSAGES': 'getMessageCount',
@@ -32,6 +30,27 @@ ADD_FLAGS = 1
 
 MAILBOXDELIMITER = "."
 #The initial Mail Boxes, None's will be replaced with MailBox objects
+
+class MailboxSubscriber(txRedisSubscriber):
+
+    def messageReceived(self, channel, message):
+        print "received %s on %s" % (message, channel)
+        (cmd, arg) = message.split(" ")
+        if "count" in cmd:
+            print "count!"
+            newuid = int(arg)
+            self.box.seqlist.append( (newuid, []))
+            self.listener.newMessages(self.box.getMessageCount(), None)
+
+
+    def assignListener(self, listener, box):
+        self.listener = listener
+        self.box = box
+
+class MailboxSubscriberFactory(txRedisClientFactory):
+    protocol = MailboxSubscriber
+
+
 
 #The user account wrapper
 class CloudFSUserAccount(object):
@@ -244,11 +263,20 @@ class CloudFSImapMailbox(object):
       pass
     raise Exception("%d is not a valid UID." % uid)
 
+  @defer.inlineCallbacks
   def addListener(self, listener):
+    mailbox_key = "%s:mailboxes:%s:channel" % (self.user, self.folder)
+    clientCreator = protocol.ClientCreator(reactor, MailboxSubscriber)
+    listener.connection = yield clientCreator.connectTCP('redis1.redis', 6379)
+    listener.connection.assignListener(listener, self)
+    yield listener.connection.subscribe(mailbox_key)
+
     self.listeners.append(listener)
-    return True
+    print "Listener Added"
+    defer.returnValue(True)
 
   def removeListener(self, listener):
+    print "Listener Deleted"
     self.listeners.remove(listener)
     return True
 
@@ -299,7 +327,8 @@ class CloudFSImapMailbox(object):
       print header, msg_uid, self.folder, self.user
     self.conn.incr("%s:mailboxes:%s:recent" % (self.user, self.folder))
     self.recent_count += 1
-
+    self.conn.publish("%s:mailboxes:%s:channel" % (self.user, self.folder),
+            "count %d" % (msg_uid))
     return defer.succeed(seq_number)
 
   def store(self, messages, flags, mode, uid):
@@ -351,7 +380,11 @@ class CloudFSImapMailbox(object):
         self.deleted_seqs.append(seq)
       else:
         print " NOT DELETED"
-        self.deleted_seqs.remove(seq)
+        try:
+            self.deleted_seqs.remove(seq)
+        except Exception:
+            print "caught and ignored this, because its not even a problem..."
+        
 
       result[seq] = stored_flags
 
