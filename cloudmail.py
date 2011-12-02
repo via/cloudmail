@@ -15,6 +15,8 @@ from txredis.protocol import RedisClientFactory as txRedisClientFactory
 from txredis.protocol import RedisSubscriber as txRedisSubscriber
 from zope.interface import implements
 
+from threading import Lock
+
 _statusRequestDict = {
     'MESSAGES': 'getMessageCount',
     'RECENT': 'getRecentCount',
@@ -38,13 +40,21 @@ class MailboxSubscriber(txRedisSubscriber):
         if "count" in cmd:
             #print "count!"
             newuid = int(arg)
+            uidlist_key = "%s:mailboxes:%s:uidlist" % (self.box.user, self.box.folder)
+            uidlist = self.box.conn.zrange(uidlist_key, 0, -1)
+            if newuid not in [int(x) for x in uidlist]:
+                print "ERROR: added new uid to seq list, but uid doesn't exist"
             self.box.seqlist.append( (newuid, []))
             self.listener.newMessages(self.box.getMessageCount(), None)
         elif "flags" in cmd:
             altereduid = int(arg)
             flags_key = "%s:mailboxes:%s:mail:%s:flags" % (self.box.user,
                     self.box.folder, altereduid)
-            seq = self.box.getSeqForUid(altereduid)
+            try:
+                seq = self.box.getSeqForUid(altereduid)
+            except  Exception:
+                #We were told about flags on a message we're not familiar with
+                return
             curflags = self.box.conn.smembers(flags_key)
             self.box.correctDeletedList(curflags, seq)
             mapping = {seq : tuple(curflags)}
@@ -167,6 +177,8 @@ class CloudFSImapMailbox(object):
                         #initialization
     self.qkey = "%s:mailboxes:queue" % (self.user) # , self.folder)
     uidlist_key = "%s:mailboxes:%s:uidlist" % (self.user, self.folder)
+
+    self.seqlock = Lock()
     self.seqlist = ([(int(x), []) for x in
         self.conn.zrange(uidlist_key, 0, -1)])
     self.notifications = None
@@ -263,12 +275,15 @@ class CloudFSImapMailbox(object):
       
   def getSeqForUid(self, uid):
     #Need to replace this list with something that can do faster lookups
-    try:
-      seq = bisect.bisect_left(map(lambda x: x[0], self.seqlist), uid)
-      if seq == len(self.seqlist) or self.seqlist[seq][0] != uid:
+      try:
+        uid = int(uid)
+        seq = bisect.bisect_left(map(lambda x: x[0], self.seqlist), uid)
+        if seq == len(self.seqlist) or self.seqlist[seq][0] != uid:
+          print "\n \n Raising ValueError for uid: %d. seq: %d len seqlist:%d. val: %d \n \n" % (uid,
+                  seq, len(self.seqlist), self.seqlist[seq][0])
           raise ValueError
-      return seq + 1
-    except:
+        return seq + 1
+      except:
         raise Exception("%d is not a valid UID." % uid)
     #print self.seqlist
 
@@ -347,6 +362,7 @@ class CloudFSImapMailbox(object):
   def store(self, messages, flags, mode, uid):
       #print "STORE: %s :: %s :: %s :: %s" % (messages, flags, mode, uid)
 
+
     if uid:
       if not messages.last or messages.last > self.getUIDNext():
          messages.last = self.getUIDNext() -1
@@ -374,15 +390,18 @@ class CloudFSImapMailbox(object):
 
       #print "Flags %s" % flags
       if mode == REMOVE_FLAGS:
-        self.conn.srem(key, *flags)
+        if flags:
+            self.conn.srem(key, *flags)
       elif mode == SET_FLAGS:
         pipe = self.conn.pipeline(transaction=True)
         pipe.multi()
         pipe.delete(key)
-        pipe.sadd(key, *flags)
+        if flags:
+            pipe.sadd(key, *flags)
         pipe.execute()
       elif mode == ADD_FLAGS:
-        self.conn.sadd(key, *flags)
+        if flags:
+            self.conn.sadd(key, *flags)
 
       stored_flags = self.conn.smembers(key)
       self.correctDeletedList(stored_flags, seq)
@@ -391,8 +410,8 @@ class CloudFSImapMailbox(object):
               "flags %d" % (msg_uid))
 
       result[seq] = stored_flags
+      return result
 
-    return result
   def correctDeletedList(self, flags, seq):
       #account for deleted flag modifications
       #print "Stored flags: " , flags
@@ -408,18 +427,18 @@ class CloudFSImapMailbox(object):
             #print "caught and ignored this, because its not even a problem..."
 
   def expunge(self):
-    deleted_seqs = []
-    seq = self.get_next_deleted_seq()
-    while seq:
-      deleted_seqs.append(seq)
-      self.expunge_helper(self.seqlist[seq - 1][0])
+      deleted_seqs = []
       seq = self.get_next_deleted_seq()
+      while seq:
+        deleted_seqs.append(seq)
+        self.expunge_helper(self.seqlist[seq - 1][0])
+        seq = self.get_next_deleted_seq()
 
-    uidlist_key = "%s:mailboxes:%s:uidlist" % (self.user, self.folder)
-    self.seqlist = ([(int(x), []) for x in
+      uidlist_key = "%s:mailboxes:%s:uidlist" % (self.user, self.folder)
+      self.seqlist = ([(int(x), []) for x in
         self.conn.zrange(uidlist_key, 0, -1)])
 
-    return deleted_seqs
+      return deleted_seqs
 
   def get_next_deleted_seq(self):
     if len(self.deleted_seqs):
@@ -497,7 +516,7 @@ class CloudFSImapMessage(object):
     body = self.conn.get("%s:mailboxes:%s:mail:%s:body" % (self.user,
       self.folder, self.uid))
     headerstart = body.find('\r\n\r\n')
-    txt = body[headerstart+4:]
+    txt = body[headerstart+2:]
     return StringIO(txt)
     
   def getSize(self):
@@ -508,8 +527,11 @@ class CloudFSImapMessage(object):
     return False
     
   def getSubPart(self, part):
-      #print "SUBPART:: %s" % part
-    raise imap4.MailboxException("getSubPart not implemented")
+      print "SUBPART:: %s" % part
+      if part is 0:
+          return self
+      else:
+          raise IndexError
 
 
 
