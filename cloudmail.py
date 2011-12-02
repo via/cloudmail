@@ -78,7 +78,7 @@ class CloudFSUserAccount(object):
     #The cache we use to pass data from one class to another
     self.user = username
     #DB connection
-    self.pool = redis.ConnectionPool(host='redis1.redis')
+    self.pool = redis.ConnectionPool(host='localhost')
     self.conn = redis.Redis(connection_pool=self.pool)
     self.defflags=["\HasNoChildren"]
     
@@ -291,7 +291,7 @@ class CloudFSImapMailbox(object):
   def addListener(self, listener):
     mailbox_key = "%s:mailboxes:%s:channel" % (self.user, self.folder)
     clientCreator = protocol.ClientCreator(reactor, MailboxSubscriber)
-    listener.connection = yield clientCreator.connectTCP('redis1.redis', 6379)
+    listener.connection = yield clientCreator.connectTCP('localhost', 6379)
     listener.connection.assignListener(listener, self)
     yield listener.connection.subscribe(mailbox_key)
 
@@ -515,7 +515,7 @@ class CloudFSImapMessage(object):
   def getBodyFile(self):
     body = self.conn.get("%s:mailboxes:%s:mail:%s:body" % (self.user,
       self.folder, self.uid))
-    headerstart = body.find('\r\n\r\n')
+    headerstart = body.find('\n\n')
     txt = body[headerstart+2:]
     return StringIO(txt)
     

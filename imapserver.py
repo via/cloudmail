@@ -59,7 +59,7 @@ if __name__ == "__main__":
 
     portal = portal.Portal(MailUserRealm())
 #    portal.registerChecker(TwitterCredentialsChecker(cache))
-    portal.registerChecker(checkers.FilePasswordDB("/root/pass"))
+    portal.registerChecker(checkers.FilePasswordDB("/home/ben/pass"))
 
     factory = IMAPFactory()
     factory.portal = portal
