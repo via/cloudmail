@@ -6,14 +6,14 @@ from twisted.python import filepath
 from zope.interface import implements
 import time, os, random, pickle
 
-from cloudmail import CloudFSUserAccount, CloudFSImapMailbox
+from cloudmail import HTTPMailAccount, CloudFSImapMailbox
 
 import email
 
 class MailUserRealm(object):
   implements(portal.IRealm)
   avatarInterfaces = {
-    imap4.IAccount: CloudFSUserAccount,
+    imap4.IAccount: HTTPMailAccount,
     }
 
 
@@ -45,7 +45,7 @@ class IMAPServerProtocol(imap4.IMAP4Server):
       print "SERVER:", line
 
 class IMAPFactory(protocol.Factory):
-  protocol = imap4.IMAP4Server
+  protocol = IMAPServerProtocol
   portal = None # placeholder
 
   def buildProtocol(self, address):
@@ -59,7 +59,7 @@ if __name__ == "__main__":
 
     portal = portal.Portal(MailUserRealm())
 #    portal.registerChecker(TwitterCredentialsChecker(cache))
-    portal.registerChecker(checkers.FilePasswordDB("/home/ben/pass"))
+    portal.registerChecker(checkers.FilePasswordDB("/home/via/dev/pass"))
 
     factory = IMAPFactory()
     factory.portal = portal

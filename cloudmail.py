@@ -2,6 +2,7 @@ import bisect
 import fnmatch
 import random
 import redis
+from httpmail import HTTPMail
 
 from cStringIO import StringIO
 from email.Generator import Generator
@@ -13,6 +14,7 @@ from twisted.mail.smtp import rfc822date
 from txredis.protocol import Redis as txRedis
 from txredis.protocol import RedisClientFactory as txRedisClientFactory
 from txredis.protocol import RedisSubscriber as txRedisSubscriber
+
 from zope.interface import implements
 
 from threading import Lock
@@ -71,40 +73,35 @@ class MailboxSubscriberFactory(txRedisClientFactory):
 
 
 #The user account wrapper
-class CloudFSUserAccount(object):
+class HTTPMailAccount(object):
   implements(imap4.IAccount)
 
   def __init__(self, username):
     #The cache we use to pass data from one class to another
     self.user = username
     #DB connection
-    self.pool = redis.ConnectionPool(host='localhost')
-    self.conn = redis.Redis(connection_pool=self.pool)
+    self.conn = HTTPMail("http://localhost:3000")
+    self.pool = None
     self.defflags=["\HasNoChildren"]
     
   #Get all the mailboxes and setup the SQL DB
   def listMailboxes(self, ref, wildcard):
-    boxes = self.conn.smembers("%s:mailboxes" % self.user)
-    #print self.user
-    mail_boxes = []
-    for i in boxes:
-        newbox = CloudFSImapMailbox(self.user, i, self.pool)
-        if fnmatch.fnmatch(i, ref + wildcard):
-          mail_boxes.append((i, newbox))
-    
-    return defer.succeed(mail_boxes)
+    def listcb(boxes):
+      mail_boxes = []
+      for i in boxes:
+          newbox = CloudFSImapMailbox(self.user, i, self.pool)
+          if fnmatch.fnmatch(i, ref + wildcard):
+            mail_boxes.append((i, newbox))
+      return mail_boxes
+    d = self.conn.getDirectories(self.user)
+    d.addCallback(listcb)
+    return d
 
   #Select a mailbox
   def select(self, path, rw=True):
       #print "Select: %s" % path
-    if self.conn.sismember( ("%s:mailboxes") % self.user, path):
-      box = CloudFSImapMailbox(self.user, path, self.pool)
-      #box.subscribe()
-      #d = box.listen()
-      #d.addCallback(printMsg)
-      #qkey = "%s:mailboxes:queue" % (self.user)
-      #self.conn.publish(qkey, "bitches")
-      return box
+    if path in self.conn.getDirectories(self.user):
+      box = HTTPMailImapMailbox(self.user, path, self.conn)
     else:
       return None
 
@@ -116,39 +113,10 @@ class CloudFSUserAccount(object):
     return True
 
   def create(self, path):
-    pipe = self.conn.pipeline(transaction=True)
-    try:
-      pipe.watch("%s:mailboxes" % self.user)
-      pipe.multi()
-      pipe.sadd("%s:mailboxes" % self.user, path)
-      pipe.delete("%s:mailboxes:%s:flags" % (self.user, path))
-#      pipe.sadd("%s:mailboxes:%s:flags" % (self.user, path), *self.defflags)
-      pipe.set("%s:mailboxes:%s:uidvalidity" % (self.user, path),
-          random.randint(0, 65535))
-      pipe.set("%s:mailboxes:%s:count" % (self.user, path), 0)
-      pipe.set("%s:mailboxes:%s:unseen" % (self.user, path), 0)
-      pipe.set("%s:mailboxes:%s:uidnext" % (self.user, path), 1)
-      pipe.execute()
-    except redis.WatchError:
-      return False
-
-    return True
+    return self.conn.newDirectory(self.user, path)
 
   def delete(self, path):
-    pipe = self.conn.pipeline(transaction=True)
-    try:
-      pipe.watch("%s:mailboxes" % self.user)
-      pipe.multi()
-      pipe.srem("%s:mailboxes" % self.user, path)
-      pipe.delete("%s:mailboxes:%s:flags" % (self.user, path))
-      pipe.delete("%s:mailboxes:%s:uidvalidity" % (self.user, path))
-      pipe.delete("%s:mailboxes:%s:count" % (self.user, path))
-      pipe.delete("%s:mailboxes:%s:unseen" % (self.user, path))
-      pipe.delete("%s:mailboxes:%s:uidnext" % (self.user, path))
-      pipe.execute()
-    except redis.WatchError:
-      return False
-    return True
+    return self.conn.deleteDirectory(self.user, path)
 
   def rename(self, oldname, newname):
     return False
@@ -162,43 +130,20 @@ class CloudFSUserAccount(object):
   def unsubscribe(self, path):
     return True
 
-class CloudFSImapMailbox(object):
+class HTTPMailImapMailbox(object):
   implements(imap4.IMailbox)
 
-  def __init__(self, user, path, pool):
+  def __init__(self, user, path, conn):
       #print "Fetching: %s" % path
     self.folder = path
     self.user = user;
-    self.listeners = []
-    self.pool = pool
-    self.conn = redis.Redis(connection_pool=pool)
-    #self.seqlist = []  #Fill this list in where seqlist[seq_number] = uid
-                        #The uidlist can remain in place to be read from on
-                        #initialization
-    self.qkey = "%s:mailboxes:queue" % (self.user) # , self.folder)
-    uidlist_key = "%s:mailboxes:%s:uidlist" % (self.user, self.folder)
+    self.conn = conn
 
-    self.seqlock = Lock()
-    self.seqlist = ([(int(x), []) for x in
-        self.conn.zrange(uidlist_key, 0, -1)])
+# eventually we could store persistent uidvalidity/uidlist in redis
+    self.seqlist = self.conn.getDirectoryMessages(self.user, self.folder)
     self.notifications = None
     self.recent_count = 0
     self.deleted_seqs = []
-
-  def subscribe(self):
-    #subscribe to uidlist/flags keys (can we subcribe to a glob?)
-    self.notifications = self.conn.pubsub()
-    self.notifications.subscribe(self.qkey)
-
-  def listen(self):
-    d = defer.Deferred()
-    msg = None
-    val = yield self.notifications.listen()
-    defer.returnValue(val)
-
-  def subscribe_callback(r):
-      pass
-      #print "SUBRECV: ", r
 
   def __del__(self):
     #unsubscribe from the flgas we care about.
@@ -217,31 +162,28 @@ class CloudFSImapMailbox(object):
       return []
 
   def getMessageCount(self):
-      #messages = self.conn.get("%s:mailboxes:%s:count" % (self.user, self.folder))
-    messages = len(self.seqlist)
-    return int(messages)
+    messages = self.conn.headDirectory(self.user, self.folder)['total']
+    return messages
 
   def getRecentCount(self):
       #messages = self.conn.get("%s:mailboxes:%s:recent" % (self.user, self.folder))
     return self.recent_count
 
   def getUnseenCount(self):
-    messages = self.conn.get("%s:mailboxes:%s:unseen" % (self.user, self.folder))
-    return int(messages)
+    messages = self.conn.headDirectory(self.user, self.folder)['unread']
+    return messages
 
   def isWriteable(self):
     return True
 
   def getUIDValidity(self):
-    validity = self.conn.get("%s:mailboxes:%s:uidvalidity" % (self.user, self.folder))
-    return int(validity)
+    return 1
 
   def getUID(self, messageNum):
-    return self.seqlist[messageNum - 1][0]
+    return messageNum
 
   def getUIDNext(self):
-    uidnext = self.conn.get("%s:mailboxes:%s:uidnext" % (self.user, self.folder))
-    return int(uidnext)
+    return self.getMessageCount() + 1
 
   def fetch(self, messages, uid):
     result = []
