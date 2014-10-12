@@ -45,9 +45,22 @@ class HTTPMail:
   def _connectionFailure(self):
     pass
 
-  def getDirectories(self, mailbox):
+  def getMailbox(self, mailbox):
     d = self.agent.request('GET', 
-        "{0}/mailboxes/{1}/directories".format(self.uri, mailbox),
+        "{0}/mailboxes/{1}".format(self.uri, mailbox),
+        None, None)
+    body = Deferred()
+    body.addCallback(lambda res: json.loads(res))
+    def resp_callback(response):
+      response.deliverBody(BodyFetcher(body))
+
+    d.addCallback(resp_callback)
+    return body
+  
+
+  def getTags(self, mailbox):
+    d = self.agent.request('GET', 
+        "{0}/mailboxes/{1}/tags/".format(self.uri, mailbox),
         None, None)
     body = Deferred()
     body.addCallback(lambda res: json.loads(res))
@@ -57,21 +70,81 @@ class HTTPMail:
     d.addCallback(resp_callback)
     return body
 
-  def newDirectory(self, mailbox, dir):
+  def getTag(self, mailbox, tag):
+    d = self.agent.request('GET', 
+        "{0}/mailboxes/{1}/tags/{2}".format(self.uri, mailbox, tag),
+        None, None)
+    body = Deferred()
+    body.addCallback(lambda res: json.loads(res))
+    def resp_callback(response):
+      response.deliverBody(BodyFetcher(body))
+
+    d.addCallback(resp_callback)
+    return body
+
+  def newTag(self, mailbox, tag):
     d = self.agent.request('PUT', 
-        "{0}/mailboxes/{1}/directories/{2}".format(self.uri, mailbox, dir),
+        "{0}/mailboxes/{1}/tags/{2}".format(self.uri, mailbox, tag),
         None, None)
     return d
 
-  def deleteDirectory(self, mailbox, dir):
-    d = self.agent.request('DELETE', 
-        "{0}/mailboxes/{1}/directories/{2}".format(self.uri, mailbox, dir),
-        None, None)
-    return d
-
-  def getDirectoryMessages(self, mailbox, dir):
+  def getMessageTags(self, mailbox, uid):
     d = self.agent.request('GET', 
-        "{0}/mailboxes/{1}/directories/{2}".format(self.uri, mailbox, dir),
+        "{0}/mailboxes/{1}/messages/{2}/tags".format(self.uri, mailbox, uid),
+        None, None)
+    body = Deferred()
+    body.addCallback(lambda res: json.loads(res))
+    def resp_callback(response):
+      response.deliverBody(BodyFetcher(body))
+
+    d.addCallback(resp_callback)
+    return body
+
+  def setMessageTag(self, mailbox, uid, tag):
+    d = self.agent.request('PUT', 
+        "{0}/mailboxes/{1}/messages/{2}/tags/{3}".format(self.uri, mailbox, uid, tag),
+        None, None)
+    return d
+
+  def deleteMessageTag(self, mailbox, uid, tag):
+    d = self.agent.request('DELETE', 
+        "{0}/mailboxes/{1}/messages/{2}/tags/{3}".format(self.uri, mailbox, uid, tag),
+        None, None)
+    return d
+
+  def getMessageFlags(self, mailbox, uid):
+    d = self.agent.request('GET', 
+        "{0}/mailboxes/{1}/messages/{2}/flags/".format(self.uri, mailbox, uid),
+        None, None)
+    body = Deferred()
+    body.addCallback(lambda res: json.loads(res))
+    def resp_callback(response):
+      response.deliverBody(BodyFetcher(body))
+
+    d.addCallback(resp_callback)
+    return body
+
+  def setMessageFlag(self, mailbox, uid, flag):
+    d = self.agent.request('PUT', 
+        "{0}/mailboxes/{1}/messages/{2}/flags/{3}".format(self.uri, mailbox, uid, flag),
+        None, None)
+    return d
+
+  def deleteMessageFlag(self, mailbox, uid, flag):
+    d = self.agent.request('DELETE', 
+        "{0}/mailboxes/{1}/messages/{2}/flags/{3}".format(self.uri, mailbox, uid, flag),
+        None, None)
+    return d
+
+  def deleteTag(self, mailbox, tag):
+    d = self.agent.request('DELETE', 
+        "{0}/mailboxes/{1}/tag/{2}".format(self.uri, mailbox, dir),
+        None, None)
+    return d
+
+  def getMessages(self, mailbox):
+    d = self.agent.request('GET', 
+        "{0}/mailboxes/{1}/messages/".format(self.uri, mailbox),
         None, None)
     body = Deferred()
     body.addCallback(lambda res: json.loads(res))
@@ -80,9 +153,9 @@ class HTTPMail:
     d.addCallback(resp_callback)
     return body
 
-  def headDirectory(self, mailbox, dir):
+  def headTag(self, mailbox, dir):
     d = self.agent.request('HEAD', 
-        "{0}/mailboxes/{1}/directories/{2}".format(self.uri, mailbox, dir),
+        "{0}/mailboxes/{1}/tags/{2}".format(self.uri, mailbox, dir),
         None, None)
     def resp_callback(response):
         unread = int(response.headers.getRawHeaders("x-unread-count")[0])
@@ -91,10 +164,10 @@ class HTTPMail:
     d.addCallback(resp_callback)
     return d
 
-  def postMessage(self, mailbox, dir, msg):
+  def postMessage(self, mailbox, tag, msg):
     prod = BodyProducer(msg)
     d = self.agent.request('POST', 
-        "{0}/mailboxes/{1}/directories/{2}".format(self.uri, mailbox, dir),
+        "{0}/mailboxes/{1}/tags/{2}".format(self.uri, mailbox, tag),
         Headers({"Content-type": ["message/rfc822"]}),
         prod)
     def resp_callback(resp):
@@ -105,10 +178,30 @@ class HTTPMail:
     d.addCallback(resp_callback)
     return d
 
+  def deleteMessage(self, mailbox, uid):
+    d = self.agent.request('DELETE', 
+        "{0}/mailboxes/{1}/messages/{2}".format(self.uri, mailbox, msg),
+        None, None)
+    return d
+
+  def getMessageMetadata(self, mailbox, msg):
+    d = self.agent.request('GET', 
+        "{0}/mailboxes/{1}/messages/{2}/meta".format(self.uri, mailbox, msg),
+        None, None)
+    body = Deferred()
+    body.addCallback(lambda res: json.loads(res))
+
+    def resp_callback(response):
+      response.deliverBody(BodyFetcher(body))
+
+    d.addCallback(resp_callback)
+    return body
+
   def getMessage(self, mailbox, msg):
     d = self.agent.request('GET', 
         "{0}/mailboxes/{1}/messages/{2}".format(self.uri, mailbox, msg),
-        None, None)
+        Headers({"Accept": ["message/rfc822"]}), 
+        None)
     body = Deferred()
 
     def resp_callback(response):
@@ -118,16 +211,16 @@ class HTTPMail:
     return body
 
 if __name__  == "__main__":
-  c = HTTPMail('http://localhost:3000')
+  c = HTTPMail('http://localhost:5000')
   def cb(x):
     print x
   def msgcb(x):
-    c.getMessage('via', x[0]).addCallback(cb)
+    c.getMessage('a', x[0]).addCallback(cb)
 
-  c.getDirectoryMessages('via', 'INBOX').addCallback(msgcb)
-  c.headDirectory('via', 'INBOX').addCallback(cb)
-  msg = open('test').read()
-  c.postMessage('via', 'INBOX', msg)
+  c.getMessages('a').addCallback(cb)
+  c.headTag('a', 'INBOX').addCallback(cb)
+  c.getMessageMetadata('a', '4937e864-94e6-4bfc-89fe-185a9a7b30d5').addCallback(cb)
+  c.getMessageTags('a', '4937e864-94e6-4bfc-89fe-185a9a7b30d5').addCallback(cb)
+  c.getMessageFlags('a', '4937e864-94e6-4bfc-89fe-185a9a7b30d5').addCallback(cb)
 
-  c.headDirectory('via', 'INBOX').addCallback(cb)
   reactor.run()

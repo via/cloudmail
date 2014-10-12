@@ -93,14 +93,14 @@ class HTTPMailAccount(object):
           if fnmatch.fnmatch(i, ref + wildcard):
             mail_boxes.append((i, newbox))
       return mail_boxes
-    d = self.conn.getDirectories(self.user)
+    d = self.conn.getTags(self.user)
     d.addCallback(listcb)
     return d
 
   #Select a mailbox
   def select(self, path, rw=True):
       #print "Select: %s" % path
-    if path in self.conn.getDirectories(self.user):
+    if path in self.conn.getTags(self.user):
       box = HTTPMailImapMailbox(self.user, path, self.conn)
     else:
       return None
@@ -113,16 +113,16 @@ class HTTPMailAccount(object):
     return True
 
   def create(self, path):
-    return self.conn.newDirectory(self.user, path)
+    return self.conn.newTag(self.user, path)
 
   def delete(self, path):
-    return self.conn.deleteDirectory(self.user, path)
+    return self.conn.deleteTag(self.user, path)
 
   def rename(self, oldname, newname):
     return False
 
   def isSubscribed(self, path):
-    return True
+    return False
 
   def subscribe(self, path):
     return True
