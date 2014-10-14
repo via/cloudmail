@@ -6,7 +6,7 @@ from twisted.python import filepath
 from zope.interface import implements
 import time, os, random, pickle
 
-from cloudmail import HTTPMailAccount, CloudFSImapMailbox
+from cloudmail import HTTPMailAccount, HTTPMailImapMailbox
 
 import email
 

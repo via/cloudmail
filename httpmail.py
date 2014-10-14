@@ -138,7 +138,7 @@ class HTTPMail:
 
   def deleteTag(self, mailbox, tag):
     d = self.agent.request('DELETE', 
-        "{0}/mailboxes/{1}/tag/{2}".format(self.uri, mailbox, dir),
+        "{0}/mailboxes/{1}/tag/{2}".format(self.uri, mailbox, tag),
         None, None)
     return d
 

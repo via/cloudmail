@@ -1,7 +1,6 @@
 import bisect
 import fnmatch
 import random
-import redis
 from httpmail import HTTPMail
 
 from cStringIO import StringIO
@@ -11,9 +10,6 @@ from twisted.cred import checkers, credentials, error as credError
 from twisted.internet import reactor, defer, protocol
 from twisted.mail import imap4
 from twisted.mail.smtp import rfc822date
-from txredis.protocol import Redis as txRedis
-from txredis.protocol import RedisClientFactory as txRedisClientFactory
-from txredis.protocol import RedisSubscriber as txRedisSubscriber
 
 from zope.interface import implements
 
@@ -34,44 +30,6 @@ ADD_FLAGS = 1
 
 MAILBOXDELIMITER = "."
 
-class MailboxSubscriber(txRedisSubscriber):
-
-    def messageReceived(self, channel, message):
-        #        print "received %s on %s" % (message, channel)
-        (cmd, arg) = message.split(" ")
-        if "count" in cmd:
-            #print "count!"
-            newuid = int(arg)
-            uidlist_key = "%s:mailboxes:%s:uidlist" % (self.box.user, self.box.folder)
-            uidlist = self.box.conn.zrange(uidlist_key, 0, -1)
-            if newuid not in [int(x) for x in uidlist]:
-                print "ERROR: added new uid to seq list, but uid doesn't exist"
-            self.box.seqlist.append( (newuid, []))
-            self.listener.newMessages(self.box.getMessageCount(), None)
-        elif "flags" in cmd:
-            altereduid = int(arg)
-            flags_key = "%s:mailboxes:%s:mail:%s:flags" % (self.box.user,
-                    self.box.folder, altereduid)
-            try:
-                seq = self.box.getSeqForUid(altereduid)
-            except  Exception:
-                #We were told about flags on a message we're not familiar with
-                return
-            curflags = self.box.conn.smembers(flags_key)
-            self.box.correctDeletedList(curflags, seq)
-            mapping = {seq : tuple(curflags)}
-            self.listener.flagsChanged(mapping)
-
-
-    def assignListener(self, listener, box):
-        self.listener = listener
-        self.box = box
-
-class MailboxSubscriberFactory(txRedisClientFactory):
-    protocol = MailboxSubscriber
-
-
-
 #The user account wrapper
 class HTTPMailAccount(object):
   implements(imap4.IAccount)
@@ -80,19 +38,23 @@ class HTTPMailAccount(object):
     #The cache we use to pass data from one class to another
     self.user = username
     #DB connection
-    self.conn = HTTPMail("http://localhost:3000")
+    self.conn = HTTPMail("http://localhost:5000")
     self.pool = None
     self.defflags=["\HasNoChildren"]
     
   #Get all the mailboxes and setup the SQL DB
   def listMailboxes(self, ref, wildcard):
+    @defer.inlineCallbacks
     def listcb(boxes):
       mail_boxes = []
       for i in boxes:
-          newbox = CloudFSImapMailbox(self.user, i, self.pool)
-          if fnmatch.fnmatch(i, ref + wildcard):
-            mail_boxes.append((i, newbox))
-      return mail_boxes
+          print i
+          state = HTTPMailImapState(self.user, i['tag'], self.conn)
+          yield state.load()
+          newbox = HTTPMailImapMailbox(state, self.conn)
+          if fnmatch.fnmatch(i['tag'], ref + wildcard):
+            mail_boxes.append((i['tag'], newbox))
+      defer.returnValue(mail_boxes)
     d = self.conn.getTags(self.user)
     d.addCallback(listcb)
     return d
@@ -100,10 +62,14 @@ class HTTPMailAccount(object):
   #Select a mailbox
   def select(self, path, rw=True):
       #print "Select: %s" % path
-    if path in self.conn.getTags(self.user):
-      box = HTTPMailImapMailbox(self.user, path, self.conn)
-    else:
-      return None
+    @defer.inlineCallbacks
+    def selectcb(tag):
+      state = HTTPMailImapState(self.user, tag['tag'], self.conn)
+      yield state.load()
+      defer.returnValue(HTTPMailImapMailbox(state, self.conn))
+    d = self.conn.getTag(self.user, path)
+    d.addCallback(selectcb)
+    return d
 
   def printMsg(msg):
       pass
@@ -113,10 +79,10 @@ class HTTPMailAccount(object):
     return True
 
   def create(self, path):
-    return self.conn.newTag(self.user, path)
+    self.conn.newTag(self.user, path)
 
   def delete(self, path):
-    return self.conn.deleteTag(self.user, path)
+    self.conn.deleteTag(self.user, path)
 
   def rename(self, oldname, newname):
     return False
@@ -130,19 +96,34 @@ class HTTPMailAccount(object):
   def unsubscribe(self, path):
     return True
 
+class HTTPMailImapState(object):
+    def __init__(self, user, tag, conn):
+        self.conn = conn
+        self.user = user
+        self.tag = tag
+        self.seq = []
+        self.msgcount = 0
+        self.recentcount = 0
+        self.unseencount = 0
+        
+
+    @defer.inlineCallbacks
+    def load(self):
+        tag = yield self.conn.headTag(self.user, self.tag)
+        self.msgcount = tag['total'] 
+        self.unseencount = tag['unread'] 
+
 class HTTPMailImapMailbox(object):
   implements(imap4.IMailbox)
 
-  def __init__(self, user, path, conn):
+  def __init__(self, state, conn):
       #print "Fetching: %s" % path
-    self.folder = path
-    self.user = user;
+    self.state = state
     self.conn = conn
 
 # eventually we could store persistent uidvalidity/uidlist in redis
-    self.seqlist = self.conn.getDirectoryMessages(self.user, self.folder)
+    #self.seqlist = self.conn.getMessages(self.user)
     self.notifications = None
-    self.recent_count = 0
     self.deleted_seqs = []
 
   def __del__(self):
@@ -153,25 +134,20 @@ class HTTPMailImapMailbox(object):
     return MAILBOXDELIMITER
 
   def getFlags(self):
-    flags = self.conn.smembers("%s:mailboxes:%s:flags" % (self.user,
-      self.folder))
     return ["\Answered", "\Flagged", "\Deleted", "\Seen", "\Draft"]
-#    return flags
 
   def getPermanentFlags(self):
       return []
 
   def getMessageCount(self):
-    messages = self.conn.headDirectory(self.user, self.folder)['total']
-    return messages
+      return self.state.msgcount
 
   def getRecentCount(self):
       #messages = self.conn.get("%s:mailboxes:%s:recent" % (self.user, self.folder))
-    return self.recent_count
+    return self.state.recentcount
 
   def getUnseenCount(self):
-    messages = self.conn.headDirectory(self.user, self.folder)['unread']
-    return messages
+      return self.state.unseencount
 
   def isWriteable(self):
     return True
@@ -229,26 +205,6 @@ class HTTPMailImapMailbox(object):
         raise Exception("%d is not a valid UID." % uid)
     #print self.seqlist
 
-  @defer.inlineCallbacks
-  def addListener(self, listener):
-    mailbox_key = "%s:mailboxes:%s:channel" % (self.user, self.folder)
-    clientCreator = protocol.ClientCreator(reactor, MailboxSubscriber)
-    listener.connection = yield clientCreator.connectTCP('localhost', 6379)
-    listener.connection.assignListener(listener, self)
-    yield listener.connection.subscribe(mailbox_key)
-
-    self.listeners.append(listener)
-    #print "Listener Added"
-    defer.returnValue(True)
-
-  def removeListener(self, listener):
-    mailbox_key = "%s:mailboxes:%s:channel" % (self.user, self.folder)
-    #print "Listener Deleted"
-    self.listeners.remove(listener)
-    listener.connection.unsubscribe(mailbox_key)
-    del listener.connection.box
-    del listener.connection
-    return True
 
   def requestStatus(self, names):
     r = {}
@@ -409,7 +365,12 @@ class HTTPMailImapMailbox(object):
     #       so keys may accumulate. If this turns out to be an issue, fix it.
     self.conn.expire(flags_key, 3600) 
 
+  def addListener(self, listener):
+     pass
     
+  def removeListener(self, listener):
+     pass
+
   def destroy(self):
     raise imap4.MailboxException("Not implemented")
     
